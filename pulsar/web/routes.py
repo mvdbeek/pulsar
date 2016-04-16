@@ -39,7 +39,9 @@ class PulsarController(Controller):
         except Exception:
             manager_name = None
         if not manager_name:
-            manager_name = args.get('manager_name', DEFAULT_MANAGER_NAME)
+            pass
+
+        manager_name = args.get('manager_name', DEFAULT_MANAGER_NAME)
         app_args = {}
         app_args['manager'] = managers[manager_name]
         app_args['file_cache'] = getattr(app, 'file_cache', None)
