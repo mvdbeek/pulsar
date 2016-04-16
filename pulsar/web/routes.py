@@ -34,7 +34,8 @@ class PulsarController(Controller):
     def _app_args(self, args, req):
         app = req.app
         managers = app.managers
-        params = req.params
+        if hasattr(req, "params"):
+            params = req.params
         manager_name = args.get('manager_name', DEFAULT_MANAGER_NAME)
         #if "manager_name" in params:
         #    manager_name = req.params["manager_name"]
