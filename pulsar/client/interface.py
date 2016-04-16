@@ -91,7 +91,7 @@ class HttpPulsarInterface(PulsarInterface):
             remote_host = "http://%s" % remote_host
         self.remote_host = remote_host
         self.private_token = destination_params.get("private_token", None)
-        self.manager = destination_params.get("manager", None)
+        #self.manager = destination_params.get("manager", None)
 
     def execute(self, command, args={}, data=None, input_path=None, output_path=None):
         url = self.__build_url(command, args)
