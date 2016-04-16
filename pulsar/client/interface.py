@@ -103,7 +103,7 @@ class HttpPulsarInterface(PulsarInterface):
         path = COMMAND_TO_PATH.get(command, Template(command)).safe_substitute(args)
         if self.private_token:
             args["private_token"] = self.private_token
-        if self.manager:
+        if hasattr(self, "manager") and self.manager:
             args["manager_name"] = self.manager
         arg_bytes = dict([(k, text_type(args[k]).encode('utf-8')) for k in args])
         data = urlencode(arg_bytes)
