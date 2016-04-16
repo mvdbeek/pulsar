@@ -34,10 +34,10 @@ class PulsarController(Controller):
     def _app_args(self, args, req):
         app = req.app
         managers = app.managers
-        #try:
-        #    manager_name = req.params.get("manager_name", None)
-        #except Exception:
-        #    manager_name = None
+        try:
+            manager_name = req.params.get("manager_name", None)
+        except Exception:
+            manager_name = None
         #if not manager_name:
         #    pass
 
