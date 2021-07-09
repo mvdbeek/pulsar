@@ -2,7 +2,6 @@
 """
 import os.path
 import posixpath
-
 from collections import deque
 from glob import glob
 from logging import getLogger
@@ -86,6 +85,7 @@ class RemoteJobDirectory(object):
         # serve legacy clients.
         allow_nested_files = file_type in ['input', 'unstructured', 'output', 'output_workdir', 'metadata', 'output_metadata']
         allow_globs = file_type in ['output_workdir']  # TODO: tool profile version where this is invalid
+        allow_nested_files = file_type in ['input', 'unstructured', 'output', 'output_workdir', 'metadata', 'output_metadata', 'tool']
         directory_source = getattr(self, TYPES_TO_METHOD.get(file_type, None), None)
         if not directory_source:
             raise Exception("Unknown file_type specified %s" % file_type)
