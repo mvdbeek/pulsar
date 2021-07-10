@@ -13,6 +13,8 @@ execution:
     pulsar:
       runner: pulsar
       dependency_resolution: remote
+      remote_metadata: true
+      metadata_strategy: extended
     local_environment:
       runner: local
 tools:
