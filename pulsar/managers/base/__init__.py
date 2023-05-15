@@ -63,7 +63,7 @@ class BaseManager(ManagerInterface):
     def __init__(self, name, app, **kwds):
         self.name = name
         self.persistence_directory = getattr(app, 'persistence_directory', None)
-        self.lock_manager = locks.LockManager()
+        self.lock_manager = locks.LockManager(None)
         self._directory_maker = DirectoryMaker(kwds.get("job_directory_mode", None))
         staging_directory = kwds.get("staging_directory", app.staging_directory)
         self._setup_staging_directory(staging_directory)
