@@ -63,6 +63,7 @@ class ExternalDrmaaQueueManager(BaseDrmaaManager):
     def get_status(self, job_id):
         external_id = self._external_id(job_id)
         if not external_id:
+            log.debug("Known external ids are %s", self._external_ids)
             raise KeyError("Failed to find external id for job_id %s" % job_id)
         external_status = super()._get_status_external(external_id)
         if external_status == status.COMPLETE and job_id not in self.reclaimed:

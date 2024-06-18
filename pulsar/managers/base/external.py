@@ -39,6 +39,7 @@ class ExternalBaseManager(DirectoryBaseManager):
         external_id = self._external_id(job_id)
         if not external_id:
             log.warning("Failed to find external id for job_id %s", job_id)
+            log.debug("Known external ids are %s", self._external_ids)
             return status.LOST
         return self._get_status_external(external_id)
 
