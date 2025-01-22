@@ -47,25 +47,20 @@ EOF
 RUN apt-get update \
     && apt-get install -y --no-install-recommends lsb-release wget \
     && wget https://ecsft.cern.ch/dist/cvmfs/cvmfs-release/cvmfs-release-latest_all.deb \
-    && dpkg -i cvmfs-release-latest_all.deb && rm -f cvmfs-release-latest_all.deb
+    && dpkg -i cvmfs-release-latest_all.deb && rm -f cvmfs-release-latest_all.deb || true
 
 # wget, gcc, pip - to build and install Pulsar.
 # bzip2 for Miniconda.
 # TODO: pycurl stuff...
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Install CVMFS client
-    cvmfs cvmfs-config-default \
-    # Install packages
-    gcc libcurl4-openssl-dev \
-    munge libmunge-dev slurm slurm-drmaa-dev \
-    bzip2 \
-    # Install Pulsar Python requirements
+    cvmfs cvmfs-config-default || true \
     && pip install --no-cache-dir -U pip \
     && pip install --no-cache-dir drmaa wheel kombu pykube pycurl \
             webob psutil PasteDeploy pyyaml paramiko \
     # Remove build deps and cleanup
-    && apt-get -y remove gcc wget lsb-release \
-    && apt-get -y autoremove \
+    && apt-get -y remove gcc wget lsb-release || true \
+    && apt-get -y autoremove || true \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /var/log/dpkg.log
 
 COPY --from=build_wheel /build/dist/pulsar_app-*-py2.py3-none-any.whl /
