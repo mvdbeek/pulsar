@@ -36,8 +36,8 @@ def run_server_for_job(args):
         if wait:
             log.info("Co-execution job setup, now waiting for job completion and postprocessing.")
             if args.build_client_manager:
-                client_manager = build_client_manager(arc_enabled=True)
-                client = client_manager.get_client({"arc_url": "http://localhost:8082", "jobs_directory": app.staging_directory}, job_id=job_config["job_id"], default_file_action=job_config["remote_staging"]["action_mapper"]["default_action"], files_endpoint=job_config["remote_staging"]["action_mapper"]["files_endpoint"])
+                client_manager = build_client_manager(local_sequential=True)
+                client = client_manager.get_client({"local_sequential": True, "jobs_directory": app.staging_directory}, job_id=job_config["job_id"], default_file_action=job_config["remote_staging"]["action_mapper"]["default_action"], files_endpoint=job_config["remote_staging"]["action_mapper"]["files_endpoint"])
                 # FIXME: we can probably only test the input staging here, so adjust tests accordingly
                 client_inputs = [
                     ClientInput(path=action_source["path"], input_type="input_path")

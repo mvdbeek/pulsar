@@ -257,7 +257,7 @@ class PollingJobClientManager(BaseRemoteConfiguredJobClientManager):
             return K8sPollingCoexecutionJobClient(destination_params, job_id, self)
         elif destination_params.get("tes_url", False):
             return TesPollingCoexecutionJobClient(destination_params, job_id, self)
-        elif destination_params.get("arc_url", False):
+        elif destination_params.get("local_sequential", False):
             return LocalSequentialClient(destination_params, job_id, self)
         else:
             raise Exception("Unknown client configuration")
@@ -271,7 +271,7 @@ def build_client_manager(**kwargs: Dict[str, Any]) -> ClientManagerInterface:
         return ClientManager(**kwargs)  # TODO: Consider more separation here.
     elif kwargs.get('amqp_url', None):
         return MessageQueueClientManager(**kwargs)
-    elif kwargs.get("k8s_enabled") or kwargs.get("tes_url") or kwargs.get("arc_enabled"):
+    elif kwargs.get("k8s_enabled") or kwargs.get("tes_url") or kwargs.get("local_sequential"):
         return PollingJobClientManager(**kwargs)
     else:
         return ClientManager(**kwargs)
