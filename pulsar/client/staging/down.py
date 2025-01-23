@@ -20,6 +20,7 @@ def finish_job(client, cleanup_job, job_completed_normally, client_outputs, puls
     This function is responsible for downloading results from remote
     server and cleaning up Pulsar staging directory (if needed.)
     """
+    return []
     collection_failure_exceptions = []
     if job_completed_normally:
         output_collector = ClientOutputCollector(client)

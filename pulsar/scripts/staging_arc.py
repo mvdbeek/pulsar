@@ -35,6 +35,7 @@ References:
 
 # When the URL is the target, use POST.
 
+import os
 import json
 import sys
 from argparse import ArgumentParser
@@ -46,9 +47,10 @@ from pulsar.client.transport import (
 
 
 
-def main(args):
+def stage(args):
     for entry in parse_json_manifest(args.json):
         if entry.get("to_path"):
+            os.makedirs(os.path.dirname(entry["to_path"]), exist_ok=True)
             get_file(entry["url"], entry["to_path"])
         elif entry.get("from_path"):
             post_file(entry["url"], entry["from_path"])
@@ -80,8 +82,12 @@ def make_parser() -> ArgumentParser:
     return parser
 
 
-if __name__ == "__main__":
-    """Invoke script from the command line."""
+def main():
     argument_parser = make_parser()
     args = argument_parser.parse_args()
-    main(args)
+    stage(args)
+
+
+if __name__ == "__main__":
+    """Invoke script from the command line."""
+    main()

@@ -29,7 +29,11 @@ def collect_outputs(job_directory: str, staging_config_path: str, output_manifes
         json.dump(new_manifest, manifest_fh)
 
 
-if __name__ == "__main__":
+def main():
     parser = make_parser()
     args = parser.parse_args()
     collect_outputs(args.job_directory, args.staging_config_path, args.output_manifest_path)
+
+
+if __name__ == "__main__":
+    main()

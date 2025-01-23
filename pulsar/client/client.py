@@ -374,6 +374,91 @@ class BaseRemoteConfiguredJobClient(BaseJobClient):
             launch_params["setup_params"] = setup_params
         return launch_params
 
+    def get_pulsar_app_config(
+        self,
+        pulsar_app_config,
+        container,
+        wait_after_submission,
+        manager_name,
+        manager_type,
+        dependencies_description,
+    ):
+
+        pulsar_app_config = pulsar_app_config or {}
+        manager_config = self._ensure_manager_config(
+            pulsar_app_config,
+            manager_name,
+            manager_type,
+        )
+
+        if (
+            "staging_directory" not in manager_config
+            and "staging_directory" not in pulsar_app_config
+        ):
+            pulsar_app_config["staging_directory"] = CONTAINER_STAGING_DIRECTORY
+
+        if self.amqp_key_prefix:
+            pulsar_app_config["amqp_key_prefix"] = self.amqp_key_prefix
+
+        if "monitor" not in manager_config:
+            manager_config["monitor"] = (
+                MonitorStyle.BACKGROUND.value
+                if wait_after_submission
+                else MonitorStyle.NONE.value
+            )
+        if "persistence_directory" not in pulsar_app_config:
+            pulsar_app_config["persistence_directory"] = os.path.join(
+                CONTAINER_STAGING_DIRECTORY, "persisted_data"
+            )
+        elif "manager" in pulsar_app_config and manager_name != "_default_":
+            log.warning(
+                "'manager' set in app config but client has non-default manager '%s', this will cause communication"
+                " failures, remove `manager` from app or client config to fix",
+                manager_name,
+            )
+
+        using_dependencies = container is None and dependencies_description is not None
+        if using_dependencies and "dependency_resolution" not in pulsar_app_config:
+            # Setup default dependency resolution for container above...
+            dependency_resolution = {
+                "cache": False,
+                "use": True,
+                "default_base_path": "/pulsar_dependencies",
+                "cache_dir": "/pulsar_dependencies/_cache",
+                "resolvers": [
+                    {  # TODO: add CVMFS resolution...
+                        "type": "conda",
+                        "auto_init": True,
+                        "auto_install": True,
+                        "prefix": "/pulsar_dependencies/conda",
+                    },
+                    {
+                        "type": "conda",
+                        "auto_init": True,
+                        "auto_install": True,
+                        "prefix": "/pulsar_dependencies/conda",
+                        "versionless": True,
+                    },
+                ],
+            }
+            pulsar_app_config["dependency_resolution"] = dependency_resolution
+        return pulsar_app_config
+
+    def _ensure_manager_config(self, pulsar_app_config, manager_name, manager_type):
+        if "manager" in pulsar_app_config:
+            manager_config = pulsar_app_config["manager"]
+        elif "managers" in pulsar_app_config:
+            managers_config = pulsar_app_config["managers"]
+            if manager_name not in managers_config:
+                managers_config[manager_name] = {}
+            manager_config = managers_config[manager_name]
+        else:
+            manager_config = {}
+            pulsar_app_config["manager"] = manager_config
+        if "type" not in manager_config:
+            manager_config["type"] = manager_type
+        return manager_config
+
 
 class MessagingClientManagerProtocol(ClientManagerProtocol):
     status_cache: Dict[str, Dict[str, Any]]
@@ -479,6 +564,8 @@ class ExecutionType(str, Enum):
 
 class LocalSequentialLaunchMixin(BaseRemoteConfiguredJobClient):
 
+    pulsar_container_image = "pulsar-pod"
+
     def launch(
         self,
         command_line,
@@ -490,41 +577,140 @@ class LocalSequentialLaunchMixin(BaseRemoteConfiguredJobClient):
         container_info=None,
         token_endpoint=None,
         pulsar_app_config=None,
-        staging_manifest=None
+        staging_manifest=None,
     ) -> Optional[ExternalId]:
         # 1. call staging script with staging manifest [handled by ARC]
         # 2. call actual command_line
         # 3. call script that does output collection (similar to __collect_outputs) and outputs staging manifest
         # 4. stage outputs back using manifest [handled by ARC]
-        import importlib.resources
         import tempfile
-        import subprocess
-        import sys
-        from pulsar import scripts
-        STAGING_SCRIPT = importlib.resources.path(scripts, "staging_arc.py")
-        MANIFEST_SCRIPT = importlib.resources.path(scripts, "collect_output_manifest.py")
 
-        with tempfile.NamedTemporaryFile(mode="w") as temp_fh:
-            temp_fh.write(json_dumps(staging_manifest))
-            temp_fh.flush()
-            staging_process = subprocess.run([sys.executable, STAGING_SCRIPT, "--json", temp_fh.name], capture_output=True)
-            assert staging_process.returncode == 0, staging_process.stderr.decode()
-        job_process = subprocess.run(command_line, shell=True, capture_output=True)
-        assert job_process.returncode == 0, job_process.stderr.decode()
-
-        job_directory = self.job_directory.job_directory
-
-        output_manifest_path = os.path.join(job_directory, "output_manifest.json")
-
-        with tempfile.NamedTemporaryFile(mode="w") as staging_config_fh:
+        local_job_dir = tempfile.mkdtemp(prefix="local-job-dir")
+        input_manifest_path = os.path.join(local_job_dir, "input_manifest.json")
+        staging_config_path = os.path.join(local_job_dir, "staging_config.json")
+        with open(input_manifest_path, "w") as input_manifest_fh:
+            input_manifest_fh.write(json_dumps(staging_manifest))
+        with open(staging_config_path, mode="w") as staging_config_fh:
             staging_config_fh.write(json_dumps(remote_staging))
-            staging_config_fh.flush()
+        launch_params = self._build_setup_message(
+            command_line,
+            dependencies_description=dependencies_description,
+            env=env,
+            remote_staging=remote_staging,
+            job_config=job_config,
+            dynamic_file_sources=dynamic_file_sources,
+            token_endpoint=token_endpoint,
+        )
+        assert container_info
+        container = container_info["container_id"]
+        guest_ports = container_info["guest_ports"]
+        pulsar_app_config = self.get_pulsar_app_config(
+            pulsar_app_config=pulsar_app_config,
+            container=container,
+            wait_after_submission=False,
+            manager_name="_default_",
+            manager_type="unqueued",
+            dependencies_description=dependencies_description,
+        )
+        base64_message = to_base64_json(launch_params)
+        base64_app_conf = to_base64_json(pulsar_app_config)
+        pulsar_container_image = self.pulsar_container_image
 
-            p = subprocess.run([sys.executable, MANIFEST_SCRIPT, "--job-directory", job_directory, "--staging-config-path", staging_config_fh.name, "--output-manifest-path", output_manifest_path])
-            assert p.returncode == 0
+        pulsar_container = CoexecutionContainerCommand(
+            pulsar_container_image,
+            "pulsar-submit",
+            [
+                "--base64",
+                base64_message,
+                "--app_conf_base64",
+                base64_app_conf,
+                "--no_wait",
+            ],
+            local_job_dir,
+            None,
+        )
+        stage_in_command = CoexecutionContainerCommand(
+            self.pulsar_container_image,
+            "pulsar-stage",
+            ["--json", "input_manifest.json"],
+            local_job_dir,
+        )
+        output_manifest_command = CoexecutionContainerCommand(
+            self.pulsar_container_image,
+            "pulsar-create-output-manifest",
+            [
+                "--job-directory",
+                self.job_directory.job_directory,
+                "--staging-config-path",
+                "staging_config.json",
+                "--output-manifest-path",
+                "output_manifest.json",
+            ],
+            local_job_dir,
+        )
+        stage_out_command = CoexecutionContainerCommand(
+            self.pulsar_container_image,
+            "pulsar-stage",
+            ["--json", "output_manifest.json"],
+            local_job_dir,
+        )
 
-        stage_out_process = subprocess.run([sys.executable, STAGING_SCRIPT, "--json", output_manifest_path], capture_output=True)
-        assert stage_out_process.returncode == 0, stage_out_process.stderr.decode()
+        ports = None
+        if guest_ports:
+            ports = [int(p) for p in guest_ports]
+
+        tool_container = CoexecutionContainerCommand(
+            container,
+            "sh",
+            [f"{self.job_directory.job_directory}/command.sh"],
+            local_job_dir,
+            ports,
+        )
+        self._launch_containers(
+            stage_in_command,
+            pulsar_container,
+            tool_container,
+            output_manifest_command,
+            stage_out_command,
+        )
+
+    def _launch_containers(
+        self,
+        stage_in_container: CoexecutionContainerCommand,
+        pulsar_submit_container: CoexecutionContainerCommand,
+        tool_container: CoexecutionContainerCommand,
+        pulsar_manifest_container: CoexecutionContainerCommand,
+        stage_out_container: CoexecutionContainerCommand,
+    ) -> Optional[ExternalId]:
+        import subprocess
+
+        sequential_containers: List[CoexecutionContainerCommand] = [
+            stage_in_container,
+            pulsar_submit_container,
+            tool_container,
+            pulsar_manifest_container,
+            stage_out_container,
+        ]
+        for container in sequential_containers:
+            cmd = [
+                "docker",
+                "run",
+                "-w",
+                f"{CONTAINER_STAGING_DIRECTORY}",
+                "-v",
+                f"{container.working_directory}:{CONTAINER_STAGING_DIRECTORY}",
+                container.image,
+                container.command,
+                *container.args,
+            ]
+            log.debug(" ".join(cmd))
+            p = subprocess.run(cmd, capture_output=True)
+            if p.returncode:
+                raise Exception(p.stderr)
+
+    def kill(self):
+        pass
+
 
 class CoexecutionLaunchMixin(BaseRemoteConfiguredJobClient):
     execution_type: ExecutionType
@@ -541,7 +727,7 @@ class CoexecutionLaunchMixin(BaseRemoteConfiguredJobClient):
         container_info=None,
         token_endpoint=None,
         pulsar_app_config=None,
-        staging_manifest=None
+        staging_manifest=None,
     ) -> Optional[ExternalId]:
         """
         """
@@ -563,48 +749,15 @@ class CoexecutionLaunchMixin(BaseRemoteConfiguredJobClient):
 
         manager_name = self.client_manager.manager_name
         manager_type = "coexecution" if container is not None else "unqueued"
-        pulsar_app_config = pulsar_app_config or {}
-        manager_config = self._ensure_manager_config(
-            pulsar_app_config, manager_name, manager_type,
+        pulsar_app_config = self.get_pulsar_app_config(
+            pulsar_app_config=pulsar_app_config,
+            container=container,
+            wait_after_submission=wait_after_submission,
+            manager_name=manager_name,
+            manager_type=manager_type,
+            dependencies_description=dependencies_description,
         )
 
-        if "staging_directory" not in manager_config and "staging_directory" not in pulsar_app_config:
-            pulsar_app_config["staging_directory"] = CONTAINER_STAGING_DIRECTORY
-
-        if self.amqp_key_prefix:
-            pulsar_app_config["amqp_key_prefix"] = self.amqp_key_prefix
-
-        if "monitor" not in manager_config:
-            manager_config["monitor"] = MonitorStyle.BACKGROUND.value if wait_after_submission else MonitorStyle.NONE.value
-        if "persistence_directory" not in pulsar_app_config:
-            pulsar_app_config["persistence_directory"] = os.path.join(CONTAINER_STAGING_DIRECTORY, "persisted_data")
-        elif "manager" in pulsar_app_config and manager_name != '_default_':
-            log.warning(
-                "'manager' set in app config but client has non-default manager '%s', this will cause communication"
-                " failures, remove `manager` from app or client config to fix", manager_name)
-
-        using_dependencies = container is None and dependencies_description is not None
-        if using_dependencies and "dependency_resolution" not in pulsar_app_config:
-            # Setup default dependency resolution for container above...
-            dependency_resolution = {
-                "cache": False,
-                "use": True,
-                "default_base_path": "/pulsar_dependencies",
-                "cache_dir": "/pulsar_dependencies/_cache",
-                "resolvers": [{  # TODO: add CVMFS resolution...
-                    "type": "conda",
-                    "auto_init": True,
-                    "auto_install": True,
-                    "prefix": '/pulsar_dependencies/conda',
-                }, {
-                    "type": "conda",
-                    "auto_init": True,
-                    "auto_install": True,
-                    "prefix": '/pulsar_dependencies/conda',
-                    "versionless": True,
-                }]
-            }
-            pulsar_app_config["dependency_resolution"] = dependency_resolution
         base64_message = to_base64_json(launch_params)
         base64_app_conf = to_base64_json(pulsar_app_config)
         pulsar_container_image = self.pulsar_container_image
@@ -655,21 +808,6 @@ class CoexecutionLaunchMixin(BaseRemoteConfiguredJobClient):
             manager_args.append(wait_arg)
         manager_args.extend(["--base64", base64_job, "--app_conf_base64", base64_app_conf])
         return manager_args
-
-    def _ensure_manager_config(self, pulsar_app_config, manager_name, manager_type):
-        if "manager" in pulsar_app_config:
-            manager_config = pulsar_app_config["manager"]
-        elif "managers" in pulsar_app_config:
-            managers_config = pulsar_app_config["managers"]
-            if manager_name not in managers_config:
-                managers_config[manager_name] = {}
-            manager_config = managers_config[manager_name]
-        else:
-            manager_config = {}
-            pulsar_app_config["manager"] = manager_config
-        if "type" not in manager_config:
-            manager_config["type"] = manager_type
-        return manager_config
 
     def _launch_containers(
         self,
@@ -811,6 +949,11 @@ class LocalSequentialClient(BaseMessageCoexecutionJobClient, LocalSequentialLaun
     def __init__(self, destination_params, job_id, client_manager):
         super().__init__(destination_params, job_id, client_manager)
 
+    def full_status(self):
+        return {
+            "status": manager_status.COMPLETE,
+            "complete": "true",  # Ancient John, what were you thinking?
+        }
 
 class TesPollingCoexecutionJobClient(BasePollingCoexecutionJobClient, LaunchesTesContainersMixin):
     """A client that co-executes pods via GA4GH TES and depends on amqp for status updates."""
