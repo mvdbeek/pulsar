@@ -38,7 +38,13 @@ def bind_manager_to_relay(manager, relay_state: RelayState, relay_url, conf):
     relay_topic_prefix = conf.get('relay_topic_prefix', '')
 
     # Create relay transport
-    relay_transport = RelayTransport(relay_url, username, password)
+    relay_transport = RelayTransport(
+        relay_url,
+        username,
+        password,
+        topic_prefix=relay_topic_prefix,
+        manager_name=manager_name
+    )
 
     # Define message handlers
     process_setup_messages = functools.partial(__process_setup_message, manager)

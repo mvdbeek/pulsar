@@ -270,7 +270,13 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
             raise Exception("relay_url is required for RelayClientManager")
 
         # Initialize relay transport
-        self.relay_transport = RelayTransport(relay_url, relay_username, relay_password)
+        self.relay_transport = RelayTransport(
+            relay_url,
+            relay_username,
+            relay_password,
+            topic_prefix=relay_topic_prefix,
+            manager_name=kwds.get('name', '_default_')
+        )
         self.relay_topic_prefix = relay_topic_prefix
         self.status_cache = {}
         self.callback_lock = threading.Lock()

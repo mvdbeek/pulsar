@@ -29,7 +29,16 @@ class RelayTransport:
     - Automatic authentication and retry
     """
 
-    def __init__(self, relay_url: str, username: str, password: str, timeout: int = 30):
+    def __init__(
+        self,
+        relay_url: str,
+        username: str,
+        password: str,
+        timeout: int = 30,
+        topic_prefix: Optional[str] = None,
+        manager_name: str = "_default_",
+        load_state: bool = True,
+    ):
         """Initialize the relay transport.
 
         Args:
@@ -37,12 +46,22 @@ class RelayTransport:
             username: Username for authentication
             password: Password for authentication
             timeout: Default request timeout in seconds
+            topic_prefix: Optional prefix for topic names
+            manager_name: Manager name for topic identification
+            load_state: Whether to load persisted state on initialization (default: True)
         """
         self.relay_url = relay_url.rstrip('/')
         self.auth_manager = RelayAuthManager(relay_url, username, password)
         self.timeout = timeout
         self.session = requests.Session()
+        self.topic_prefix = topic_prefix
+        self.manager_name = manager_name
         self._last_message_ids: Dict[str, str] = {}  # Track last message ID per topic
+        self._state_topic = self._make_topic_name("consumer_state")
+
+        # Try to load persisted state from relay
+        if load_state:
+            self._load_state_from_relay()
 
     def _get_headers(self) -> Dict[str, str]:
         """Get HTTP headers including authentication token.
@@ -355,13 +374,16 @@ class RelayTransport:
         """Manually set the last message ID for a topic.
 
         This can be useful for resuming from a specific message ID
-        after a restart.
+        after a restart. Automatically persists the state to the relay.
 
         Args:
             topic: Topic name
             message_id: Message ID to set as the last seen message
         """
         self._last_message_ids[topic] = message_id
+
+        # Persist state after each update
+        self._persist_state_to_relay()
 
     def clear_tracked_message_ids(self, topic: Optional[str] = None) -> None:
         """Clear tracked message IDs.
@@ -378,6 +400,94 @@ class RelayTransport:
             self._last_message_ids.clear()
             log.debug("Cleared all tracked message IDs")
 
+    def _make_topic_name(self, base_topic: str) -> str:
+        """Create a topic name with optional prefix and manager suffix.
+
+        Args:
+            base_topic: Base topic name (e.g., 'consumer_state', 'job_setup')
+
+        Returns:
+            Fully qualified topic name
+        """
+        parts = []
+
+        # Add prefix if provided
+        if self.topic_prefix:
+            parts.append(self.topic_prefix)
+
+        # Add base topic
+        parts.append(base_topic)
+
+        # Add manager name if not default
+        if self.manager_name != "_default_":
+            parts.append(self.manager_name)
+
+        return "_".join(parts)
+
+    def _load_state_from_relay(self) -> None:
+        """Load persisted tracking state from the relay server.
+
+        Polls the consumer_state topic to retrieve the most recent state
+        message and restores tracked message IDs from it.
+        """
+        try:
+            log.debug("Loading persisted state from relay topic '%s'", self._state_topic)
+            # Poll the state topic to get the most recent message
+            messages = self.long_poll([self._state_topic], timeout=5)
+
+            if messages:
+                # Get the most recent state message
+                latest_state = messages[-1]
+                payload = latest_state.get('payload', {})
+                tracked_since = payload.get('tracked_since', {})
+
+                if tracked_since:
+                    self._last_message_ids = tracked_since.copy()
+                    log.info(
+                        "Restored tracking state from relay: %d topics tracked",
+                        len(tracked_since)
+                    )
+                    log.debug("Restored tracked IDs: %s", tracked_since)
+            else:
+                log.debug("No persisted state found in relay")
+
+        except Exception as e:
+            # Don't fail initialization if state loading fails
+            log.warning("Failed to load persisted state from relay: %s", e)
+
+    def _persist_state_to_relay(self) -> None:
+        """Persist current tracking state to the relay server.
+
+        Publishes the current tracked message IDs to the consumer_state topic
+        so they can be restored after a restart.
+        """
+        if not self._last_message_ids:
+            # Nothing to persist
+            return
+
+        try:
+            state_payload = {
+                'manager_name': self.manager_name,
+                'timestamp': time.time(),
+                'tracked_since': self._last_message_ids.copy()
+            }
+
+            self.post_message(
+                topic=self._state_topic,
+                payload=state_payload
+            )
+
+            log.debug(
+                "Persisted tracking state to relay: %d topics",
+                len(self._last_message_ids)
+            )
+
+        except Exception as e:
+            # Don't fail on persistence errors, just log them
+            log.warning("Failed to persist state to relay: %s", e)
+
     def close(self):
         """Close the transport and cleanup resources."""
+        # Persist final state before closing
+        self._persist_state_to_relay()
         self.session.close()
