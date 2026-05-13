@@ -26,7 +26,11 @@ pytestmark = pytest.mark.skipif(
 if importlib.util.find_spec("pulsar_relay_client") is not None:
     from pulsar_relay_client import RelayTransportError
 else:
-    RelayTransportError = Exception  # placeholder so the module imports under py3.7
+    # Module-level skip above means tests never reference this fallback;
+    # the assignment exists purely so the import line doesn't crash on
+    # py3.7. mypy sees both branches statically and rejects rebinding a
+    # type — silenced because the runtime path is provably unreachable.
+    RelayTransportError = Exception  # type: ignore[misc, assignment]
 
 from pulsar.capabilities import (  # noqa: E402 — guarded above
     ContainerRuntimeInfo,
