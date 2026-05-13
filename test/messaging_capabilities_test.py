@@ -10,12 +10,30 @@ the rest of the design relies on:
 * The topic name reflects the manager and prefix.
 * ``published_at`` is stamped at publish time, not at collection time.
 """
+import importlib.util
 from unittest import mock
 
-from pulsar_relay_client import RelayTransportError
+import pytest
 
-from pulsar.capabilities import PulsarCapabilities, ManagerCapabilities, ContainerRuntimeInfo
-from pulsar.messaging import bind_relay
+# ``pulsar-relay-client`` requires Python >=3.10 (PEP 508 marker on the
+# requirements pin). Skip the entire module on older interpreters where
+# the relay code path is unreachable but pulsar itself still installs.
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("pulsar_relay_client") is None,
+    reason="pulsar-relay-client requires Python >=3.10",
+)
+
+if importlib.util.find_spec("pulsar_relay_client") is not None:
+    from pulsar_relay_client import RelayTransportError
+else:
+    RelayTransportError = Exception  # placeholder so the module imports under py3.7
+
+from pulsar.capabilities import (  # noqa: E402 — guarded above
+    ContainerRuntimeInfo,
+    ManagerCapabilities,
+    PulsarCapabilities,
+)
+from pulsar.messaging import bind_relay  # noqa: E402 — guarded above
 
 
 def _caps(manager_name="_default_"):
