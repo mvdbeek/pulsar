@@ -15,9 +15,9 @@ from pulsar.capabilities import (
     DependencyResolverInfo,
     PulsarCapabilities,
     _collect_dependency_resolvers,
+    _collect_manager,
     _conda_available,
     _detect_container_runtime,
-    _num_concurrent_jobs,
     collect_all_capabilities,
     collect_capabilities,
 )
@@ -61,7 +61,10 @@ class _App:
                  dep_mgr=None, managers=None):
         self.staging_directory = staging
         self.persistence_directory = persistence
-        self.dependency_manager = dep_mgr
+        # dependency_manager is always set on a real PulsarApp; default
+        # to an empty stand-in so the collector's direct attribute
+        # access works without each test having to spell it out.
+        self.dependency_manager = dep_mgr if dep_mgr is not None else _DepMgr([])
         self.managers = managers or {}
 
 
@@ -154,11 +157,35 @@ def test_detect_container_runtime_cross_product(docker, singularity, apptainer):
     assert cr.apptainer_available is apptainer
 
 
+def _make_conda_resolver(*, prefix, **attrs):
+    """Build a real CondaDependencyResolver bypassing its heavy __init__.
+
+    The collector uses ``isinstance(r, CondaDependencyResolver)`` to
+    pick conda-specific fields, so the test fixture has to be a real
+    subclass instance — duck-typed mocks won't match. ``prefix`` is a
+    property reading ``self.conda_context.conda_prefix``, so we set the
+    underlying field rather than trying to assign through the property.
+    """
+    from galaxy.tool_util.deps.resolvers.conda import CondaDependencyResolver
+
+    class _CondaContext:
+        def __init__(self, p):
+            self.conda_prefix = p
+
+    inst = CondaDependencyResolver.__new__(CondaDependencyResolver)
+    inst.conda_context = _CondaContext(prefix)
+    for k, v in attrs.items():
+        setattr(inst, k, v)
+    return inst
+
+
 def test_collects_dependency_resolver_attributes():
     resolvers = [
         _Resolver("tool_shed_packages", versionless=False, disabled=False),
-        _Resolver("conda", disabled=True, auto_init=True, auto_install=False,
-                  prefix="/p", versionless=True),
+        _make_conda_resolver(
+            disabled=True, auto_init=True, auto_install=False,
+            prefix="/p", versionless=True,
+        ),
     ]
     app = _App(dep_mgr=_DepMgr(resolvers))
     out = _collect_dependency_resolvers(app)
@@ -184,18 +211,18 @@ def test_resolver_without_resolver_type_is_skipped():
 
 def test_num_concurrent_jobs_prefers_work_threads_len():
     mgr = _Manager("m", "queued_python", work_threads=[None, None, None])
-    assert _num_concurrent_jobs(mgr._proxied_manager) == 3
+    assert _collect_manager(mgr).num_concurrent_jobs == 3
 
 
 def test_num_concurrent_jobs_falls_back_to_attr():
     mgr = _Manager("m", "unqueued")
     mgr._proxied_manager.num_concurrent_jobs = 7
-    assert _num_concurrent_jobs(mgr._proxied_manager) == 7
+    assert _collect_manager(mgr).num_concurrent_jobs == 7
 
 
 def test_num_concurrent_jobs_none_when_neither():
     mgr = _Manager("m", "unqueued")
-    assert _num_concurrent_jobs(mgr._proxied_manager) is None
+    assert _collect_manager(mgr).num_concurrent_jobs is None
 
 
 def test_stateful_manager_proxy_unwrap_for_manager_type():

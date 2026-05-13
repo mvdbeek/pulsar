@@ -26,12 +26,22 @@ from dataclasses import (
     field,
 )
 from typing import (
-    Any,
+    TYPE_CHECKING,
+    Dict,
+    List,
     Optional,
     Union,
 )
 
+from galaxy.tool_util.deps.resolvers.conda import CondaDependencyResolver
+
 from pulsar import __version__ as pulsar_version
+
+if TYPE_CHECKING:
+    # Imported lazily to avoid the runtime cycle: pulsar.core imports this
+    # module to populate the cache.
+    from pulsar.core import PulsarApp
+    from pulsar.managers.stateful import StatefulManagerProxy
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +80,7 @@ class PulsarCapabilities:
     staging_directory: str
     persistence_directory: Optional[str]
     tool_dependency_dir: Optional[str]
-    dependency_resolvers: list = field(default_factory=list)
+    dependency_resolvers: List[DependencyResolverInfo] = field(default_factory=list)
     conda_available: bool = False
     container_runtime: ContainerRuntimeInfo = field(default_factory=ContainerRuntimeInfo)
     manager: Optional[ManagerCapabilities] = None
@@ -79,55 +89,63 @@ class PulsarCapabilities:
         return asdict(self)
 
 
-def collect_capabilities(app: Any, manager: Any) -> PulsarCapabilities:
-    """Build the capabilities snapshot for a single manager on this app.
-
-    ``app`` is a ``PulsarApp``; ``manager`` is a ``StatefulManagerProxy``
-    instance (the kind held in ``app.managers``). Both are duck-typed so
-    that unit tests can pass minimal stand-ins.
-    """
+def collect_capabilities(app: "PulsarApp", manager: "StatefulManagerProxy") -> PulsarCapabilities:
+    """Build the capabilities snapshot for a single manager on this app."""
     resolvers = _collect_dependency_resolvers(app)
-    conda_available = _conda_available(resolvers)
-    container_runtime = _detect_container_runtime()
     manager_caps = _collect_manager(manager)
     return PulsarCapabilities(
         schema_version=SCHEMA_VERSION,
         manager_name=manager_caps.name,
         pulsar_version=pulsar_version,
-        staging_directory=getattr(app, "staging_directory", ""),
-        persistence_directory=getattr(app, "persistence_directory", None),
+        staging_directory=app.staging_directory,
+        persistence_directory=app.persistence_directory,
         tool_dependency_dir=_tool_dependency_dir(app),
         dependency_resolvers=resolvers,
-        conda_available=conda_available,
-        container_runtime=container_runtime,
+        conda_available=_conda_available(resolvers),
+        container_runtime=_detect_container_runtime(),
         manager=manager_caps,
     )
 
 
-def _collect_dependency_resolvers(app: Any) -> list:
-    dm = getattr(app, "dependency_manager", None)
-    if dm is None:
-        return []
-    out = []
-    for r in getattr(dm, "dependency_resolvers", []) or []:
+def collect_all_capabilities(app: "PulsarApp") -> Dict[str, PulsarCapabilities]:
+    """Map ``manager_name -> PulsarCapabilities`` for every manager on the app.
+
+    Used by ``PulsarApp.__init__`` to populate the cache. Failures on
+    individual managers are logged and skipped so a misconfigured
+    manager cannot prevent the app from coming up.
+    """
+    out: Dict[str, PulsarCapabilities] = {}
+    for name, manager in app.managers.items():
+        try:
+            out[name] = collect_capabilities(app, manager)
+        except Exception:
+            log.exception("Failed to collect capabilities for manager %s", name)
+    return out
+
+
+def _collect_dependency_resolvers(app: "PulsarApp") -> List[DependencyResolverInfo]:
+    out: List[DependencyResolverInfo] = []
+    for r in app.dependency_manager.dependency_resolvers:
+        # ``resolver_type`` and ``versionless`` are class attributes on
+        # concrete subclasses, not the base — probe defensively rather
+        # than narrow the loop type to every known subclass.
         rt = getattr(r, "resolver_type", None)
         if not rt:
             continue
         info = DependencyResolverInfo(
             type=str(rt),
-            disabled=bool(getattr(r, "disabled", False)),
+            disabled=r.disabled,
             versionless=bool(getattr(r, "versionless", False)),
         )
-        if rt == "conda":
-            info.auto_init = _maybe_bool(getattr(r, "auto_init", None))
-            info.auto_install = _maybe_bool(getattr(r, "auto_install", None))
-            prefix = getattr(r, "prefix", None)
-            info.prefix = str(prefix) if prefix else None
+        if isinstance(r, CondaDependencyResolver):
+            info.auto_init = bool(r.auto_init)
+            info.auto_install = bool(r.auto_install)
+            info.prefix = str(r.prefix) if r.prefix else None
         out.append(info)
     return out
 
 
-def _conda_available(resolvers: list) -> bool:
+def _conda_available(resolvers: List[DependencyResolverInfo]) -> bool:
     """A conda resolver is enabled and conda is reachable on this host.
 
     "Reachable" means either the conda binary is on PATH or the resolver's
@@ -153,49 +171,25 @@ def _detect_container_runtime() -> ContainerRuntimeInfo:
     )
 
 
-def _collect_manager(manager: Any) -> ManagerCapabilities:
-    name = getattr(manager, "name", "_default_")
-    underlying = getattr(manager, "_proxied_manager", manager)
-    mtype = getattr(underlying.__class__, "manager_type", "unknown")
-    num = _num_concurrent_jobs(underlying)
-    return ManagerCapabilities(name=name, type=mtype, num_concurrent_jobs=num)
-
-
-def _num_concurrent_jobs(underlying: Any) -> Union[int, str, None]:
+def _collect_manager(manager: "StatefulManagerProxy") -> ManagerCapabilities:
+    underlying = manager._proxied_manager
+    # ``manager_type`` is a class attribute set on each concrete manager
+    # implementation but not on the proxy or its base. The ``work_threads``
+    # attribute is queued_python-only — falling back to a public
+    # ``num_concurrent_jobs`` covers any future manager that exposes one.
+    mtype = getattr(type(underlying), "manager_type", "unknown")
     work_threads = getattr(underlying, "work_threads", None)
+    num: Union[int, str, None]
     if work_threads is not None:
         try:
-            return len(work_threads)
+            num = len(work_threads)
         except TypeError:
-            return None
-    return getattr(underlying, "num_concurrent_jobs", None)
+            num = None
+    else:
+        num = getattr(underlying, "num_concurrent_jobs", None)
+    return ManagerCapabilities(name=manager.name, type=str(mtype), num_concurrent_jobs=num)
 
 
-def _tool_dependency_dir(app: Any) -> Optional[str]:
-    dm = getattr(app, "dependency_manager", None)
-    if dm is None:
-        return None
-    base = getattr(dm, "default_base_path", None)
+def _tool_dependency_dir(app: "PulsarApp") -> Optional[str]:
+    base = getattr(app.dependency_manager, "default_base_path", None)
     return str(base) if base else None
-
-
-def _maybe_bool(v: Any) -> Optional[bool]:
-    if v is None:
-        return None
-    return bool(v)
-
-
-def collect_all_capabilities(app: Any) -> dict:
-    """Map ``manager_name -> PulsarCapabilities`` for every manager on the app.
-
-    Convenience wrapper used by ``PulsarApp.__init__`` to populate the
-    cache; failures on individual managers are logged and skipped so a
-    misconfigured manager cannot prevent the app from coming up.
-    """
-    out: dict = {}
-    for name, manager in (getattr(app, "managers", {}) or {}).items():
-        try:
-            out[name] = collect_capabilities(app, manager)
-        except Exception:
-            log.exception("Failed to collect capabilities for manager %s", name)
-    return out
