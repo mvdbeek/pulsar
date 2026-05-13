@@ -15,6 +15,7 @@ from pulsar import (
     messaging,
 )
 from pulsar.cache import Cache
+from pulsar.capabilities import collect_all_capabilities
 from pulsar.manager_factory import build_managers
 from pulsar.tools import ToolBox
 from pulsar.tools.authorization import get_authorizer
@@ -50,6 +51,7 @@ class PulsarApp:
         self.__setup_job_metrics(conf)
         self.__setup_user_auth_manager(conf)
         self.__setup_managers(conf)
+        self.__setup_capabilities()
         self.__setup_file_cache(conf)
         self.__setup_bind_to_message_queue(conf)
         self.__recover_jobs()
@@ -121,6 +123,13 @@ class PulsarApp:
 
     def __setup_managers(self, conf):
         self.managers = build_managers(self, conf)
+
+    def __setup_capabilities(self):
+        # Snapshot of static config + host probes that
+        # publish_manager_capabilities_to_relay publishes to the relay.
+        # Computed once; stays valid for this process's lifetime since
+        # pulsar doesn't reload app.yml.
+        self.capabilities_by_manager = collect_all_capabilities(self)
 
     def __recover_jobs(self):
         for manager in self.managers.values():
