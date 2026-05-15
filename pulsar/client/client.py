@@ -117,6 +117,11 @@ class BaseJobClient:
         self.env = destination_params.get("env", [])
         self.files_endpoint = destination_params.get("files_endpoint", None)
         self.token_endpoint = destination_params.get("token_endpoint", None)
+        # When set, the per-job credential will be carried exclusively in the
+        # ``Authorization: Bearer …`` header and stripped from outgoing URLs.
+        # Defaults False so existing deployments (which may be talking to a
+        # Galaxy that does not yet read the header) keep working.
+        self.use_bearer_auth = bool(destination_params.get("use_bearer_auth", False))
 
         default_file_action = self.destination_params.get("default_file_action", "transfer")
         if default_file_action not in actions:

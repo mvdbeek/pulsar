@@ -39,7 +39,10 @@ from .transport import (
 from .transport.tus import (
     tus_upload_file,
 )
-from .job_key_auth import auth_header_from_url
+from .job_key_auth import (
+    auth_header_from_url,
+    extract_and_strip_job_key,
+)
 from .util import (
     copy_to_path,
     directory_files,
@@ -197,6 +200,12 @@ class FileActionMapper:
         self.ssh_port = config.get("ssh_port", None)
         self.mappers = mappers_from_dicts(config.get("paths", []))
         self.files_endpoint = config.get("files_endpoint", None)
+        # When the originating client opted into header-only authentication
+        # (``use_bearer_auth=True`` on destination_params), the per-job
+        # credential is carried here separately and outgoing URLs are bare.
+        # See ``job_key_auth.extract_and_strip_job_key`` and
+        # ``__client_to_config`` below.
+        self.auth_secret = config.get("auth_secret", None)
 
     def action(self, source, type, mapper=None):
         path = source.get("path", None)
@@ -218,7 +227,7 @@ class FileActionMapper:
         return filter(lambda m: path_type.UNSTRUCTURED in m.path_types, self.mappers)
 
     def to_dict(self):
-        return dict(
+        result = dict(
             default_action=self.default_action,
             files_endpoint=self.files_endpoint,
             ssh_key=self.ssh_key,
@@ -227,6 +236,12 @@ class FileActionMapper:
             ssh_host=self.ssh_host,
             paths=list(map(lambda m: m.to_dict(), self.mappers))
         )
+        if self.auth_secret is not None:
+            # Persists across the Galaxy→Pulsar staging boundary so the
+            # server-side mapper reconstruction can attach the secret to
+            # actions for the post-job upload pass.
+            result["auth_secret"] = self.auth_secret
+        return result
 
     def __client_to_config(self, client):
         action_config_path = client.action_config_path
@@ -236,6 +251,15 @@ class FileActionMapper:
             config = getattr(client, "file_actions", {})
         config["default_action"] = client.default_file_action
         config["files_endpoint"] = client.files_endpoint
+        if getattr(client, "use_bearer_auth", False):
+            # The client opted into header-only auth — pull the per-job
+            # credential out of the endpoint URL once at construction time
+            # so subsequent ``__inject_url`` builds bare URLs and the secret
+            # ends up in ``auth_secret``, not embedded everywhere.
+            secret, bare = extract_and_strip_job_key(config["files_endpoint"])
+            if secret is not None:
+                config["files_endpoint"] = bare
+                config["auth_secret"] = secret
         for attr in ['ssh_key', 'ssh_user', 'ssh_port', 'ssh_host']:
             if hasattr(client, attr):
                 config[attr] = getattr(client, attr)
@@ -287,6 +311,11 @@ class FileActionMapper:
             url_base = "%s&" % url_base
         url_params = urlencode({"path": action.path, "file_type": file_type})
         action.url = f"{url_base}{url_params}"
+        # Attach the per-job credential when the mapper is in header-auth
+        # mode — the action carries it across the staging boundary and
+        # sends it as ``Authorization: Bearer`` at HTTP time.
+        if self.auth_secret is not None:
+            action.auth_secret = self.auth_secret
 
     def __inject_ssh_properties(self, action):
         for attr in ["ssh_key", "ssh_host", "ssh_port", "ssh_user"]:
@@ -481,26 +510,40 @@ class RemoteTransferAction(BaseAction):
     action_type = "remote_transfer"
     staging = STAGING_ACTION_REMOTE
 
-    def __init__(self, source, file_lister=None, url=None):
+    def __init__(self, source, file_lister=None, url=None, auth_secret=None):
         super().__init__(source, file_lister=file_lister)
         self.url = url
+        # When the mapper ran in header-auth mode, the secret travels here
+        # rather than in the URL — see ``FileActionMapper.__inject_url``.
+        self.auth_secret = auth_secret
 
     def to_dict(self):
-        return self._extend_base_dict(url=self.url)
+        d = self._extend_base_dict(url=self.url)
+        if self.auth_secret is not None:
+            d["auth_secret"] = self.auth_secret
+        return d
 
     @classmethod
     def from_dict(cls, action_dict):
-        return RemoteTransferAction(source=action_dict["source"], url=action_dict["url"])
+        return RemoteTransferAction(
+            source=action_dict["source"],
+            url=action_dict["url"],
+            auth_secret=action_dict.get("auth_secret"),
+        )
+
+    def _auth_headers(self):
+        # Prefer the explicit per-action secret (set when the mapper ran
+        # in header-auth mode); fall back to the URL-embedded form for
+        # legacy clients that haven't opted in.
+        if self.auth_secret is not None:
+            return {"Authorization": f"Bearer {self.auth_secret}"}
+        return auth_header_from_url(self.url)
 
     def write_to_path(self, path):
-        # Send the per-job credential as ``Authorization: Bearer …`` in
-        # addition to keeping it in the URL (where Galaxy historically
-        # looks for it). Newer Galaxy verifies the header first; older
-        # Galaxy falls back to the query parameter.
-        get_file(self.url, path, headers=auth_header_from_url(self.url))
+        get_file(self.url, path, headers=self._auth_headers())
 
     def write_from_path(self, pulsar_path):
-        post_file(self.url, pulsar_path, headers=auth_header_from_url(self.url))
+        post_file(self.url, pulsar_path, headers=self._auth_headers())
 
 
 class RemoteTransferTusAction(BaseAction):
@@ -513,22 +556,35 @@ class RemoteTransferTusAction(BaseAction):
     action_type = "remote_transfer_tus"
     staging = STAGING_ACTION_REMOTE
 
-    def __init__(self, source, file_lister=None, url=None):
+    def __init__(self, source, file_lister=None, url=None, auth_secret=None):
         super().__init__(source, file_lister=file_lister)
         self.url = url
+        self.auth_secret = auth_secret
 
     def to_dict(self):
-        return self._extend_base_dict(url=self.url)
+        d = self._extend_base_dict(url=self.url)
+        if self.auth_secret is not None:
+            d["auth_secret"] = self.auth_secret
+        return d
 
     @classmethod
     def from_dict(cls, action_dict):
-        return RemoteTransferAction(source=action_dict["source"], url=action_dict["url"])
+        return RemoteTransferAction(
+            source=action_dict["source"],
+            url=action_dict["url"],
+            auth_secret=action_dict.get("auth_secret"),
+        )
+
+    def _auth_headers(self):
+        if self.auth_secret is not None:
+            return {"Authorization": f"Bearer {self.auth_secret}"}
+        return auth_header_from_url(self.url)
 
     def write_to_path(self, path):
-        get_file(self.url, path, headers=auth_header_from_url(self.url))
+        get_file(self.url, path, headers=self._auth_headers())
 
     def write_from_path(self, pulsar_path):
-        tus_upload_file(self.url, pulsar_path, headers=auth_header_from_url(self.url))
+        tus_upload_file(self.url, pulsar_path, headers=self._auth_headers())
 
 
 class RemoteObjectStoreCopyAction(BaseAction):

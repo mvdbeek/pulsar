@@ -25,15 +25,49 @@ parsing the URL and instead carry the credential separately end-to-end.
 from typing import (
     Dict,
     Optional,
+    Tuple,
 )
 from urllib.parse import (
     parse_qs,
+    urlencode,
     urlparse,
+    urlunparse,
 )
 
 JOB_KEY_QUERY_PARAM = "job_key"
 AUTHORIZATION_HEADER = "Authorization"
 BEARER_PREFIX = "Bearer "
+
+
+def extract_and_strip_job_key(url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Pull ``?job_key=<value>`` out of a URL.
+
+    Returns ``(secret, bare_url)``. ``secret`` is ``None`` when the URL has
+    no ``job_key`` parameter (or no URL was supplied at all); ``bare_url``
+    is the URL with the parameter removed (or the original URL if no
+    parameter was present). Other query-string parameters are preserved.
+
+    Used by ``FileActionMapper`` when ``use_bearer_auth`` is enabled — we
+    parse the secret out of the incoming ``files_endpoint`` at submit
+    time, persist it as a separate ``auth_secret`` field in
+    ``launch_config``, and rebuild action URLs without the embedded
+    credential.
+    """
+    if not url:
+        return None, url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None, url
+    # ``keep_blank_values`` so unrelated parameters like ``?foo=`` round-trip
+    # unchanged. Drop only ``job_key``.
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    values = query.pop(JOB_KEY_QUERY_PARAM, None)
+    if not values:
+        return None, url
+    new_query = urlencode(query, doseq=True)
+    bare = urlunparse(parsed._replace(query=new_query))
+    return values[0], bare
 
 
 def auth_header_from_url(url: Optional[str]) -> Dict[str, str]:

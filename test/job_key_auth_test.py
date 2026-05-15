@@ -2,7 +2,10 @@
 
 import pytest
 
-from pulsar.client.job_key_auth import auth_header_from_url
+from pulsar.client.job_key_auth import (
+    auth_header_from_url,
+    extract_and_strip_job_key,
+)
 
 
 class TestAuthHeaderFromUrl:
@@ -38,3 +41,44 @@ class TestAuthHeaderFromUrl:
         # malformed URL just means "no header"; the request goes out and
         # whatever server is on the other side returns a 4xx.
         assert auth_header_from_url(malformed) == {}
+
+
+class TestExtractAndStripJobKey:
+    def test_strips_job_key_returns_secret_and_bare_url(self):
+        secret, bare = extract_and_strip_job_key(
+            "https://galaxy.example/api/jobs/123/files?job_key=abc123&path=/etc"
+        )
+        assert secret == "abc123"
+        # ``path`` survives; ``job_key`` is gone.
+        assert "job_key" not in bare
+        assert "path=%2Fetc" in bare
+
+    def test_strips_when_job_key_is_only_param(self):
+        secret, bare = extract_and_strip_job_key(
+            "https://galaxy.example/api/jobs/123/files?job_key=abc"
+        )
+        assert secret == "abc"
+        assert bare == "https://galaxy.example/api/jobs/123/files"
+
+    def test_returns_original_url_when_no_job_key(self):
+        original = "https://galaxy.example/api/jobs/123/files?path=/etc"
+        secret, bare = extract_and_strip_job_key(original)
+        assert secret is None
+        assert bare == original
+
+    def test_handles_none(self):
+        assert extract_and_strip_job_key(None) == (None, None)
+
+    def test_handles_empty_string(self):
+        assert extract_and_strip_job_key("") == (None, "")
+
+    def test_preserves_fragment_and_other_query_params(self):
+        secret, bare = extract_and_strip_job_key(
+            "https://galaxy.example/path?a=1&job_key=secret&b=2#frag"
+        )
+        assert secret == "secret"
+        # Fragment and other params round-trip intact (urlencode may
+        # reorder; assert both are present).
+        assert "a=1" in bare and "b=2" in bare
+        assert "#frag" in bare
+        assert "job_key" not in bare
