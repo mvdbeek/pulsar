@@ -6,6 +6,7 @@ import re
 from cryptography.hazmat.backends import default_backend
 from cryptography.x509 import load_der_x509_certificate
 
+from pulsar.client.job_key_auth import auth_header_from_url
 from pulsar.user_auth.methods.interface import AuthMethod
 
 import logging
@@ -17,7 +18,11 @@ def get_token(job_directory, provider):
     log.debug("Getting OIDC token for provider " + provider + " from Galaxy")
     endpoint = job_directory.load_metadata("launch_config")["token_endpoint"]
     endpoint = endpoint + "&provider=" + provider
-    r = requests.get(url=endpoint)
+    # Send the per-job credential as ``Authorization: Bearer …`` in addition
+    # to keeping it in the URL — newer Galaxy verifies the header first,
+    # older Galaxy falls back to the query parameter. Either way the secret
+    # stops leaking to anything that captures URLs but not headers.
+    r = requests.get(url=endpoint, headers=auth_header_from_url(endpoint) or None)
     return r.text
 
 

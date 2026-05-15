@@ -39,6 +39,7 @@ from .transport import (
 from .transport.tus import (
     tus_upload_file,
 )
+from .job_key_auth import auth_header_from_url
 from .util import (
     copy_to_path,
     directory_files,
@@ -492,10 +493,14 @@ class RemoteTransferAction(BaseAction):
         return RemoteTransferAction(source=action_dict["source"], url=action_dict["url"])
 
     def write_to_path(self, path):
-        get_file(self.url, path)
+        # Send the per-job credential as ``Authorization: Bearer …`` in
+        # addition to keeping it in the URL (where Galaxy historically
+        # looks for it). Newer Galaxy verifies the header first; older
+        # Galaxy falls back to the query parameter.
+        get_file(self.url, path, headers=auth_header_from_url(self.url))
 
     def write_from_path(self, pulsar_path):
-        post_file(self.url, pulsar_path)
+        post_file(self.url, pulsar_path, headers=auth_header_from_url(self.url))
 
 
 class RemoteTransferTusAction(BaseAction):
@@ -520,10 +525,10 @@ class RemoteTransferTusAction(BaseAction):
         return RemoteTransferAction(source=action_dict["source"], url=action_dict["url"])
 
     def write_to_path(self, path):
-        get_file(self.url, path)
+        get_file(self.url, path, headers=auth_header_from_url(self.url))
 
     def write_from_path(self, pulsar_path):
-        tus_upload_file(self.url, pulsar_path)
+        tus_upload_file(self.url, pulsar_path, headers=auth_header_from_url(self.url))
 
 
 class RemoteObjectStoreCopyAction(BaseAction):

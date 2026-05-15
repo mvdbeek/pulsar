@@ -1,6 +1,10 @@
 import io
 import logging
 import os.path
+from typing import (
+    Mapping,
+    Optional,
+)
 
 import requests
 try:
@@ -63,13 +67,15 @@ class PycurlTransport:
             buf.close()
 
 
-def post_file(url, path):
+def post_file(url, path, headers: Optional[Mapping[str, str]] = None):
     if not os.path.exists(path):
         # pycurl doesn't always produce a great exception for this,
         # wrap it in a better one.
         message = NO_SUCH_FILE_MESSAGE % (path, url)
         raise Exception(message)
     c = _new_curl_object_for_url(url)
+    if headers:
+        c.setopt(c.HTTPHEADER, [f"{k}: {v}" for k, v in headers.items()])
     c.setopt(c.HTTPPOST, [("file", (c.FORM_FILE, path.encode('ascii')))])
     c.perform()
     status_code = int(c.getinfo(HTTP_CODE))
@@ -80,8 +86,11 @@ def post_file(url, path):
         )
 
 
-def get_size(url) -> int:
-    response = requests.head(url, headers={"accept-encoding": "identity"})
+def get_size(url, headers: Optional[Mapping[str, str]] = None) -> int:
+    request_headers = {"accept-encoding": "identity"}
+    if headers:
+        request_headers.update(headers)
+    response = requests.head(url, headers=request_headers)
     if response.status_code >= 299:
         log.warning("Response to HEAD request for '%s' with status code %s, cannot resume download", url, response.status_code)
         return -1
@@ -92,12 +101,12 @@ def get_size(url) -> int:
         return -1
 
 
-def get_file(url, path: str):
+def get_file(url, path: str, headers: Optional[Mapping[str, str]] = None):
     success_codes = [200]
     size = 0
     if os.path.exists(path):
         size = os.path.getsize(path)
-        remote_size = get_size(url)
+        remote_size = get_size(url, headers=headers)
         if size and remote_size == size:
             # Already got the whole file, fixes https://github.com/galaxyproject/pulsar/issues/340
             return
@@ -115,6 +124,8 @@ def get_file(url, path: str):
     try:
         c = _new_curl_object_for_url(url)
         c.setopt(c.WRITEFUNCTION, buf.write)
+        if headers:
+            c.setopt(c.HTTPHEADER, [f"{k}: {v}" for k, v in headers.items()])
         if size > 0:
             log.info('transfer of %s will resume at %s bytes', url, size)
             c.setopt(c.RESUME_FROM, size)

@@ -1,6 +1,10 @@
 import os
 import re
-from typing import Dict
+from typing import (
+    Dict,
+    Mapping,
+    Optional,
+)
 from urllib.parse import urlparse
 
 import requests
@@ -17,16 +21,16 @@ DEFAULT_PULSAR_TUS_CHUNK_SIZE = 10**7
 PULSAR_TUS_CHUNK_SIZE = int(os.getenv('PULSAR_TUS_CHUNK_SIZE', DEFAULT_PULSAR_TUS_CHUNK_SIZE))
 
 
-def tus_upload_file(url: str, path: str) -> None:
+def tus_upload_file(url: str, path: str, headers: Optional[Mapping[str, str]] = None) -> None:
     if not tus_client_available:
         raise Exception(TUS_CLIENT_UNAVAILABLE_MESSAGE)
 
     storage = None
     metadata: Dict[str, str] = {}
 
-    headers: Dict[str, str] = {}
+    request_headers: Dict[str, str] = dict(headers or {})
     tus_url = find_tus_endpoint(url)
-    my_client = client.TusClient(tus_url, headers=headers)
+    my_client = client.TusClient(tus_url, headers=request_headers)
     uploader = my_client.uploader(path, metadata=metadata, url_storage=storage)
     uploader.chunk_size = PULSAR_TUS_CHUNK_SIZE
     uploader.upload()
@@ -37,7 +41,7 @@ def tus_upload_file(url: str, path: str) -> None:
     # and if it has one Galaxy sticks the URL parameters into the "payload" object
     # for the controller. So encoded session_id in the POST body - it probably
     # all belongs there anyway.
-    post_response = requests.post(url, data={"session_id": tus_session_id})
+    post_response = requests.post(url, data={"session_id": tus_session_id}, headers=request_headers or None)
     post_response.raise_for_status()
 
 
