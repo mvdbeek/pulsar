@@ -19,6 +19,7 @@ from typing import (
     Optional,
     Type,
     TYPE_CHECKING,
+    Tuple,
 )
 
 from typing_extensions import Protocol
@@ -387,7 +388,7 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
         self.callback_lock = threading.Lock()
         self.callback_thread = None
         self.heartbeat_thread = None
-        self._pending_status_deliveries = {}
+        self._pending_status_deliveries: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._pending_status_lock = threading.Lock()
         self.status_consumer_ready = threading.Event()
         self.active = True
