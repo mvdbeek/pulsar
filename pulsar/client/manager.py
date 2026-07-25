@@ -8,6 +8,7 @@ specific actions.
 import functools
 import os
 import threading
+import uuid
 from logging import getLogger
 from os import getenv
 from queue import Queue
@@ -54,6 +55,8 @@ if TYPE_CHECKING:
 log = getLogger(__name__)
 
 DEFAULT_TRANSFER_THREADS = 2
+DEFAULT_RELAY_STATUS_GROUP = "galaxy-job-status-v1"
+DEFAULT_RELAY_STATUS_HEARTBEAT_SECONDS = 30
 
 
 def _per_handler_cursor_path(
@@ -323,6 +326,8 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
         relay_topic_prefix: str = '',
         relay_cursor_path: Optional[str] = None,
         relay_handler_id: Optional[str] = None,
+        relay_status_group: str = DEFAULT_RELAY_STATUS_GROUP,
+        relay_status_max_inflight: int = 1,
         relay_credentials_file: Optional[str] = None,
         relay_refresh_token: Optional[str] = None,
         on_refresh_token_rotated: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -342,16 +347,9 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
         if not relay_url:
             raise Exception("relay_url is required for RelayClientManager")
 
-        # Initialize relay transport. ``relay_cursor_path`` persists the long-poll
-        # cursor across Galaxy restarts so we don't silently skip messages
-        # published by Pulsar while Galaxy was down. Galaxy job handlers run as
-        # separate processes — each one polls the relay independently and so
-        # tracks its own cursor — so we expand the operator-supplied path with
-        # a stable per-(handler, manager) suffix (``relay_handler_id`` or
-        # ``GALAXY_SERVER_NAME``, plus ``manager_name``) to give every handler
-        # + tenant its own file. A shared cursor would suffer last-writer-wins
-        # corruption when handlers persist concurrently and could silently
-        # rewind another handler's progress.
+        # Keep the existing cursor configuration for compatibility with other
+        # Relay calls. Grouped status polling below deliberately does not read
+        # or advance this cursor; Relay owns that delivery state instead.
         auth_manager: Optional[RelayAuthManager] = None
         if relay_refresh_token is not None:
             # In-memory refresh-token path used by multi-tenant callers
@@ -381,9 +379,17 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
             auth_manager=auth_manager,
         )
         self.relay_topic_prefix = relay_topic_prefix
+        handler_name = relay_handler_id or os.environ.get("GALAXY_SERVER_NAME") or "handler"
+        self.relay_status_group = relay_status_group
+        self.relay_status_consumer = "%s:%s" % (handler_name, uuid.uuid4().hex)
+        self.relay_status_max_inflight = max(1, int(relay_status_max_inflight))
         self.status_cache = {}
         self.callback_lock = threading.Lock()
         self.callback_thread = None
+        self.heartbeat_thread = None
+        self._pending_status_deliveries = {}
+        self._pending_status_lock = threading.Lock()
+        self.status_consumer_ready = threading.Event()
         self.active = True
         self.shutdown_event = threading.Event()
 
@@ -410,19 +416,76 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
         """Process status update messages from the relay."""
         if not self.active:
             log.debug("Obtained update message for inactive client manager, ignoring.")
-            return
+            return "retry"
 
         try:
-            payload = message_data.get('payload', {})
+            payload = dict(message_data.get('payload', {}))
+            delivery = message_data.get("_relay_delivery")
+            if delivery:
+                payload["_relay_delivery"] = delivery
             if "job_id" in payload:
                 job_id = payload["job_id"]
-                self.status_cache[job_id] = payload
+                self.status_cache[job_id] = {
+                    key: value for key, value in payload.items() if key != "_relay_delivery"
+                }
             log.debug("Handling asynchronous status update from Pulsar via relay.")
-            callback(payload)
+            callback_result = callback(payload)
+            if callback_result == "retry":
+                return "retry"
+            return "defer" if callback_result is False else "ack"
         except Exception:
             log.exception("Failure processing job status update message.")
+            return "retry"
         except BaseException as e:
             log.exception("Failure processing job status update message - BaseException type %s" % type(e))
+            return "retry"
+
+    @staticmethod
+    def _delivery_key(delivery):
+        return delivery["topic"], delivery["message_id"]
+
+    def _remember_status_delivery(self, delivery):
+        if delivery.get("lease_lost"):
+            return
+        with self._pending_status_lock:
+            self._pending_status_deliveries[self._delivery_key(delivery)] = delivery
+
+    def acknowledge_status_update(self, delivery):
+        """Acknowledge a status only after Galaxy has committed finalization."""
+        if not delivery or delivery.get("lease_lost"):
+            return False
+        acknowledged = self.relay_transport.update_group_delivery(delivery, "ack")
+        if acknowledged:
+            with self._pending_status_lock:
+                self._pending_status_deliveries.pop(self._delivery_key(delivery), None)
+        return acknowledged
+
+    def touch_status_update(self, delivery):
+        """Renew a delivery and mark the shared handle when its lease is lost."""
+        if not delivery or delivery.get("lease_lost"):
+            return False
+        touched = self.relay_transport.update_group_delivery(delivery, "touch")
+        if not touched:
+            delivery["lease_lost"] = True
+            with self._pending_status_lock:
+                self._pending_status_deliveries.pop(self._delivery_key(delivery), None)
+        return touched
+
+    def status_heartbeat(self):
+        while self.active:
+            if self.shutdown_event.wait(timeout=DEFAULT_RELAY_STATUS_HEARTBEAT_SECONDS):
+                break
+            with self._pending_status_lock:
+                deliveries = list(self._pending_status_deliveries.values())
+            for delivery in deliveries:
+                try:
+                    self.touch_status_update(delivery)
+                except Exception:
+                    log.exception(
+                        "Failed to renew relay status delivery %s/%s",
+                        delivery.get("topic"),
+                        delivery.get("message_id"),
+                    )
 
     def status_consumer(self, callback_wrapper):
         """Long-poll the relay for status update messages."""
@@ -431,13 +494,35 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
 
         log.info("Starting relay status consumer for topic '%s'", topic)
 
+        first_poll = True
         while self.active:
             try:
-                # Long poll for status updates (30 second timeout)
-                messages = self.relay_transport.long_poll([topic], timeout=30)
+                with self._pending_status_lock:
+                    capacity = self.relay_status_max_inflight - len(self._pending_status_deliveries)
+                if capacity <= 0:
+                    if self.shutdown_event.wait(timeout=1):
+                        break
+                    continue
+                messages = self.relay_transport.long_poll(
+                    [topic],
+                    timeout=1 if first_poll else 30,
+                    group=self.relay_status_group,
+                    consumer=self.relay_status_consumer,
+                    max_messages=capacity,
+                )
+                if first_poll:
+                    self.status_consumer_ready.set()
+                    first_poll = False
 
                 for message in messages:
-                    callback_wrapper(message)
+                    delivery = message.get("_relay_delivery")
+                    outcome = callback_wrapper(message)
+                    if not delivery:
+                        continue
+                    if outcome == "ack":
+                        self.relay_transport.update_group_delivery(delivery, "ack")
+                    elif outcome == "defer":
+                        self._remember_status_delivery(delivery)
 
             except Exception:
                 if self.active:
@@ -470,6 +555,15 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
             thread.daemon = True
             thread.start()
             self.callback_thread = thread
+            heartbeat_thread = threading.Thread(
+                name="pulsar_client_%s_relay_status_heartbeat" % self.manager_name,
+                target=self.status_heartbeat,
+            )
+            heartbeat_thread.daemon = True
+            heartbeat_thread.start()
+            self.heartbeat_thread = heartbeat_thread
+            if not self.status_consumer_ready.wait(timeout=5):
+                raise RuntimeError("Timed out initializing Relay status consumer group")
 
     def ensure_has_ack_consumers(self):
         """No-op for relay client manager, as acknowledgements are handled via HTTP."""
@@ -508,6 +602,8 @@ class RelayClientManager(BaseRemoteConfiguredJobClientManager):
         if ensure_cleanup:
             if self.callback_thread is not None:
                 self.callback_thread.join()
+            if self.heartbeat_thread is not None:
+                self.heartbeat_thread.join()
         # Close relay transport
         if hasattr(self, 'relay_transport'):
             self.relay_transport.close()

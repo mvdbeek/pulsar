@@ -22,6 +22,16 @@ from .relay_state import RelayState
 log = logging.getLogger(__name__)
 
 DEFAULT_RELAY_LONG_POLL_TIMEOUT = 30.0
+TERMINAL_JOB_STATUSES = {"complete", "cancelled", "failed", "lost"}
+
+
+def _status_message_metadata(payload):
+    """Build Relay ordering/deduplication metadata for a status payload."""
+    job_id = str(payload.get("job_id") or "unknown")
+    metadata = {"ordering_key": job_id}
+    if payload.get("status") in TERMINAL_JOB_STATUSES:
+        metadata["deduplication_key"] = "job-terminal:%s" % job_id
+    return metadata
 
 
 def _server_cursor_path(manager) -> Optional[str]:
@@ -123,7 +133,11 @@ def bind_manager_to_relay(manager, relay_state: RelayState, relay_url, conf, rel
         outbox = build_status_outbox(
             manager,
             conf,
-            publish_fn=lambda payload: relay_transport.post_message(status_update_topic, payload),
+            publish_fn=lambda payload: relay_transport.post_message(
+                status_update_topic,
+                payload,
+                metadata=_status_message_metadata(payload),
+            ),
             suffix="relay-status-outbox",
         )
         if outbox is not None:
@@ -140,7 +154,11 @@ def bind_manager_to_relay(manager, relay_state: RelayState, relay_url, conf, rel
                 outbox.enqueue(payload)
                 return
             try:
-                relay_transport.post_message(status_update_topic, payload)
+                relay_transport.post_message(
+                    status_update_topic,
+                    payload,
+                    metadata=_status_message_metadata(payload),
+                )
             except (RelayTransportError, requests.RequestException):
                 log.exception(
                     "Failure to publish Pulsar state change for job_id %s via "

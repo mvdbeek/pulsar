@@ -3,6 +3,7 @@ from os import environ
 
 from pulsar.client.manager import (
     ClientManager,
+    RelayClientManager,
     _per_handler_cursor_path,
 )
 
@@ -87,3 +88,30 @@ def test_per_handler_cursor_path_omits_default_manager_name():
     assert _per_handler_cursor_path(
         "/var/lib/galaxy/relay_cursor.json", "handler0",
     ) == "/var/lib/galaxy/relay_cursor-handler0.json"
+
+
+def test_relay_callback_passes_delivery_and_can_defer_ack():
+    manager = object.__new__(RelayClientManager)
+    manager.active = True
+    manager.status_cache = {}
+    delivery = {
+        "group": "galaxy-job-status-v1",
+        "consumer": "handler0:boot",
+        "topic": "job_status_update",
+        "message_id": "1-0",
+    }
+    received = []
+
+    outcome = manager.callback_wrapper(
+        lambda payload: received.append(payload) or False,
+        {
+            "payload": {"job_id": "42", "status": "complete"},
+            "_relay_delivery": delivery,
+        },
+    )
+
+    assert outcome == "defer"
+    assert received[0]["_relay_delivery"] is delivery
+    assert manager.status_cache["42"] == {"job_id": "42", "status": "complete"}
+
+    assert manager.callback_wrapper(lambda payload: "retry", {"payload": {}}) == "retry"

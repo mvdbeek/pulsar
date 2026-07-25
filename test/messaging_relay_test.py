@@ -1,6 +1,7 @@
 from pulsar.messaging.bind_relay import (
     DEFAULT_RELAY_LONG_POLL_TIMEOUT,
     _relay_long_poll_timeout,
+    _status_message_metadata,
     start_consumer,
 )
 from pulsar.messaging.relay_state import RelayState
@@ -40,3 +41,13 @@ def test_start_consumer_uses_configured_long_poll_timeout():
 
     assert not thread.is_alive()
     assert transport.calls == [(["job_setup"], 1.5)]
+
+
+def test_status_message_metadata_orders_all_and_deduplicates_terminal_updates():
+    assert _status_message_metadata({"job_id": "42", "status": "running"}) == {
+        "ordering_key": "42"
+    }
+    assert _status_message_metadata({"job_id": "42", "status": "complete"}) == {
+        "ordering_key": "42",
+        "deduplication_key": "job-terminal:42",
+    }
