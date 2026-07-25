@@ -3,6 +3,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
+        git \
         libcurl4-openssl-dev \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -10,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /pulsar
 
 COPY requirements.txt /pulsar/requirements.txt
+COPY .ci/pulsar-relay-client-constraints.txt /pulsar/pulsar-relay-client-constraints.txt
 COPY setup.py /pulsar/setup.py
 COPY setup.cfg /pulsar/setup.cfg
 COPY README.rst /pulsar/README.rst
@@ -18,7 +20,7 @@ COPY pulsar /pulsar/pulsar
 COPY scripts /pulsar/scripts
 COPY test/resilience/entrypoint.sh /pulsar/entrypoint.sh
 
-RUN pip install --no-cache-dir -e . \
+RUN PIP_CONSTRAINT=/pulsar/pulsar-relay-client-constraints.txt pip install --no-cache-dir -e . \
     && pip install --no-cache-dir kombu==5.3.7 amqp==5.2.0 requests requests-toolbelt pycurl \
     && chmod +x /pulsar/entrypoint.sh
 

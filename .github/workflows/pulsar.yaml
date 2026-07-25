@@ -1,5 +1,7 @@
 name: pulsar
 on: [push, pull_request]
+env:
+  PIP_CONSTRAINT: ${{ github.workspace }}/.ci/pulsar-relay-client-constraints.txt
 jobs:
   lint:
     name: Lint

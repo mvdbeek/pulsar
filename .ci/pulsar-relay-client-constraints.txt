@@ -1,0 +1,4 @@
+# Use the companion pulsar-relay change until pulsar-relay-client 0.3.0 is
+# published. This constrains (but does not replace) the runtime requirement in
+# requirements.txt, so release installs continue to require version 0.3.0.
+pulsar-relay-client @ git+https://github.com/mvdbeek/pulsar-relay.git@493330778b8bb7396d5e54dc36947c720b600c54#subdirectory=client
