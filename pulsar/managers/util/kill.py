@@ -3,14 +3,20 @@ import signal
 import subprocess
 from math import isfinite
 from platform import system
-from time import sleep
-from typing import TYPE_CHECKING
+from time import (
+    monotonic,
+    sleep,
+)
+from typing import (
+    Callable,
+    TYPE_CHECKING,
+)
 
 try:
     from psutil import (
         NoSuchProcess,
         Process,
-        wait_procs,
+        STATUS_ZOMBIE,
     )
 except ImportError:
     """Don't make psutil a strict requirement, but use if available."""
@@ -46,7 +52,10 @@ def _psutil_kill_pid(pid: int, grace_period: float = 5):
             process.terminate()
         except NoSuchProcess:
             pass
-    _, alive = wait_procs(processes, timeout=grace_period)
+    # Not psutil.wait_procs: it reaps children of this process, racing the
+    # manager's Popen.wait on the job's root process for its exit status.
+    _wait_until(lambda: not any(_is_running(p) for p in processes), grace_period)
+    alive = [process for process in processes if _is_running(process)]
     # EXIT handlers may start cleanup commands during the grace period.
     survivors = set(alive)
     for process in alive:
@@ -59,6 +68,22 @@ def _psutil_kill_pid(pid: int, grace_period: float = 5):
             process.kill()
         except NoSuchProcess:
             pass
+
+
+def _is_running(process: "Process") -> bool:
+    try:
+        return process.is_running() and process.status() != STATUS_ZOMBIE
+    except NoSuchProcess:
+        return False
+
+
+def _wait_until(done: Callable[[], bool], timeout: float) -> None:
+    deadline = monotonic() + timeout
+    while not done():
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return
+        sleep(min(0.05, remaining))
 
 
 def _stock_kill_pid(pid: int, grace_period: float = 5):

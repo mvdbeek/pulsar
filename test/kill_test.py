@@ -93,6 +93,14 @@ wait
         assert_stopped(child_pid)
 
 
+@pytest.mark.parametrize("use_psutil", [True, False])
+def test_cancel_leaves_exit_status_to_caller(tmp_path, use_psutil):
+    # Job managers wait on the job's root process to record its return code.
+    with running_job(tmp_path, 'touch "$1/ready"; exec sleep 60') as process:
+        kill_pid(process.pid, use_psutil=use_psutil, grace_period=0.5)
+        assert process.wait(timeout=5) == -signal.SIGTERM
+
+
 def assert_stopped(pid):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
