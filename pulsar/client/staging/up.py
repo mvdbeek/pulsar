@@ -23,6 +23,7 @@ from typing import (
 from . import COMMAND_VERSION_FILENAME
 from .inputs import CLIENT_INPUT_PATH_TYPES
 from ..action_mapper import (
+    BaseRemoteTransferAction,
     FileActionMapper,
     MessageAction,
     path_type,
@@ -602,7 +603,7 @@ class TransferTracker:
             action = self.__action(source, type)
             path = source.get("path")
             # A remote transfer fetches from the URL Galaxy issued, if any; other actions read the path.
-            fetched_from_url = bool(source.get("url")) and getattr(action, "inject_url", False)
+            fetched_from_url = bool(source.get("url")) and isinstance(action, BaseRemoteTransferAction)
             if path is not None and not fetched_from_url and not exists(path):
                 message = "__action_for_transfer called on non-existent file - [%s]" % path
                 log.warning(message)
