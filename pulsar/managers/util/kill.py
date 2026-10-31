@@ -29,6 +29,8 @@ def kill_pid(pid: int, use_psutil: bool = True, grace_period: float = 5):
 
     ``grace_period`` bounds the SIGTERM wait in seconds. On Windows psutil
     terminate, like taskkill /F, stops processes without a grace period.
+    On POSIX, if ``pid`` leads a process group, survivors in that group are
+    killed too, including processes reparented away from ``pid`` during cleanup.
     """
     if not isfinite(grace_period) or grace_period < 0:
         raise ValueError("grace_period must be finite and nonnegative")
@@ -44,6 +46,7 @@ def _psutil_kill_pid(pid: int, grace_period: float = 5):
         processes = [parent, *parent.children(recursive=True)]
     except NoSuchProcess:
         return
+    sweep_group = _is_group_leader(pid)
 
     # Signal waiting shells first: terminating a child can start its shell's
     # EXIT trap, which a later TERM to that shell would interrupt.
@@ -52,9 +55,16 @@ def _psutil_kill_pid(pid: int, grace_period: float = 5):
             process.terminate()
         except NoSuchProcess:
             pass
+
+    def done() -> bool:
+        nonlocal sweep_group
+        # Once the group is empty its id may be reused, so stop tracking it.
+        sweep_group = sweep_group and _group_exists(pid)
+        return not any(_is_running(p) for p in processes)
+
     # Not psutil.wait_procs: it reaps children of this process, racing the
     # manager's Popen.wait on the job's root process for its exit status.
-    _wait_until(lambda: not any(_is_running(p) for p in processes), grace_period)
+    _wait_until(done, grace_period)
     alive = [process for process in processes if _is_running(process)]
     # EXIT handlers may start cleanup commands during the grace period.
     survivors = set(alive)
@@ -68,12 +78,27 @@ def _psutil_kill_pid(pid: int, grace_period: float = 5):
             process.kill()
         except NoSuchProcess:
             pass
+    if sweep_group:
+        # Cleanup commands whose parent exited left the tree but not the group.
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def _is_running(process: "Process") -> bool:
     try:
         return process.is_running() and process.status() != STATUS_ZOMBIE
     except NoSuchProcess:
+        return False
+
+
+def _is_group_leader(pid: int) -> bool:
+    if os.name != "posix":
+        return False
+    try:
+        return os.getpgid(pid) == pid
+    except OSError:
         return False
 
 

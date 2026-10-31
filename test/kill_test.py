@@ -95,6 +95,19 @@ wait
 
 
 @pytest.mark.parametrize("use_psutil", [True, False])
+def test_cancel_kills_process_orphaned_by_cleanup(tmp_path, use_psutil):
+    script = """
+trap 'sleep 60 & echo $! > "$1/orphan"' EXIT
+sleep 60 &
+touch "$1/ready"
+wait
+"""
+    with running_job(tmp_path, script) as process:
+        kill_pid(process.pid, use_psutil=use_psutil, grace_period=0.5)
+        assert_stopped(int((tmp_path / "orphan").read_text()))
+
+
+@pytest.mark.parametrize("use_psutil", [True, False])
 def test_cancel_leaves_exit_status_to_caller(tmp_path, use_psutil):
     # Job managers wait on the job's root process to record its return code.
     with running_job(tmp_path, 'touch "$1/ready"; exec sleep 60') as process:
