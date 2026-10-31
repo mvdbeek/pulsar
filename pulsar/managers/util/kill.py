@@ -86,6 +86,14 @@ def _wait_until(done: Callable[[], bool], timeout: float) -> None:
         sleep(min(0.05, remaining))
 
 
+def _group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _stock_kill_pid(pid: int, grace_period: float = 5):
     is_windows = system() == "Windows"
 
@@ -103,20 +111,16 @@ def __kill_windows(pid):
 
 
 def __kill_posix(pid: int, grace_period: float = 5):
-    def __check_pid():
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        return
+    # Wait on the whole group: the leader may exit while a shell it started
+    # is still running its EXIT trap.
+    _wait_until(lambda: not _group_exists(pid), grace_period)
+    # Once the group is empty its id may be reused, so only kill a live group.
+    if _group_exists(pid):
         try:
-            os.kill(pid, 0)
-            return True
+            os.killpg(pid, signal.SIGKILL)
         except OSError:
-            return False
-
-    if __check_pid():
-        for sig in [signal.SIGTERM, signal.SIGKILL]:
-            try:
-                os.killpg(pid, sig)
-            except OSError:
-                return
-            if sig == signal.SIGTERM:
-                sleep(grace_period)
-            if not __check_pid():
-                return
+            pass
