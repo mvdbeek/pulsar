@@ -43,6 +43,7 @@ def kill_pid(pid: int, use_psutil: bool = True, grace_period: float = 5):
 def _psutil_kill_pid(pid: int, grace_period: float = 5):
     try:
         parent = Process(pid)
+        # psutil lists each process before its descendants.
         processes = [parent, *parent.children(recursive=True)]
     except NoSuchProcess:
         return

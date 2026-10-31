@@ -125,6 +125,32 @@ def test_cancel_returns_once_job_exits(tmp_path, use_psutil):
         assert time.monotonic() - started < 10
 
 
+def test_cancel_signals_parents_before_descendants(tmp_path, monkeypatch):
+    script = """
+sleep 60 &
+bash -c 'sleep 60 & touch "$0/ready"; wait' "$1" &
+wait
+"""
+    signalled = []
+    terminate = psutil.Process.terminate
+
+    def recording_terminate(self):
+        signalled.append(self.pid)
+        terminate(self)
+
+    monkeypatch.setattr(psutil.Process, "terminate", recording_terminate)
+    with running_job(tmp_path, script) as process:
+        # Record the tree first: children of signalled parents get reparented.
+        tree = psutil.Process(process.pid).children(recursive=True)
+        parent_child_pairs = [(child.ppid(), child.pid) for child in tree]
+        kill_pid(process.pid, grace_period=0.5)
+    # Job shell -> its sleep and inner shell; inner shell -> its sleep.
+    assert len(parent_child_pairs) == 3
+    order = {pid: index for index, pid in enumerate(signalled)}
+    for ppid, pid in parent_child_pairs:
+        assert order[ppid] < order[pid]
+
+
 def assert_stopped(pid):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
