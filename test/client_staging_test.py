@@ -228,6 +228,20 @@ class TestStager(TempDirectoryTestCase):
             "dataset_3_files/index.html": manifest["index.html"],
         }
 
+    def test_extra_files_manifest_naming_a_file_outside_its_directory_is_refused(self):
+        # "../dataset_4.dat" would otherwise be staged over the job's dataset_4.dat input.
+        self.client.default_file_action = "remote_transfer"
+        self.job_config["job_directory"] = "/pulsar/staging/1"
+        self.job_config["system_properties"]["separator"] = "/"
+        never_pulled = os.path.join(self.temp_directory, "files", "dataset_3_files")
+        for name in ["../dataset_4.dat", "moo/../../dataset_4.dat", "/etc/passwd"]:
+            manifest = {name: "https://galaxy.test/staging/extra/3/x?sig=c"}
+            self.client_job_description.client_inputs = ClientInputs(
+                [ClientInput(never_pulled, CLIENT_INPUT_PATH_TYPES.INPUT_EXTRA_FILES_PATH, extra_files=manifest)]
+            )
+            with pytest.raises(Exception, match="names a file outside it"):
+                self._submit()
+
     def _assert_inputs_uploaded(self):
         # Expect both files staged
         uploaded_file1 = self.client.put_files[0]

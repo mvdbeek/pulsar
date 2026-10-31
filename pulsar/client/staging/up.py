@@ -6,6 +6,7 @@ from os.path import (
     basename,
     dirname,
     exists,
+    isabs,
     isdir,
     join,
     relpath,
@@ -530,9 +531,14 @@ class TransferTracker:
 
         ``directory`` is the directory's path on Galaxy and need not exist here; it names the
         files on Pulsar as a whole directory transfer would. ``manifest`` maps each file's path
-        relative to the directory to its URL.
+        relative to the directory to its URL. A path that leaves the directory is refused, so it
+        cannot name another input staged into the same job.
         """
         for directory_file_name, url in manifest.items():
+            if isabs(directory_file_name) or ".." in directory_file_name.split("/"):
+                message = "Extra files manifest for [%s] names a file outside it - [%s]" % (directory, directory_file_name)
+                log.warning(message)
+                raise Exception(message)
             directory_file_path = join(directory, directory_file_name)
             remote_name = self.path_helper.remote_name(
                 relpath(directory_file_path, dirname(directory))
