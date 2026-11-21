@@ -382,11 +382,11 @@ def test_collect_workdir_output_retries_until_source_is_visible(tmp_path):
     real_copy = client_module.copy
     attempts = []
 
-    def copy_visible_on_second_attempt(source, destination):
+    def copy_visible_on_second_attempt(source, destination, **kwargs):
         attempts.append(source)
         if len(attempts) == 1:
             raise FileNotFoundError(2, "No such file or directory", source)
-        real_copy(source, destination)
+        real_copy(source, destination, **kwargs)
 
     with mock.patch.object(client_module, "copy", side_effect=copy_visible_on_second_attempt), \
             mock.patch.object(time, "sleep") as sleep:
